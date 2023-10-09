@@ -13,9 +13,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/containers/podman/v4/pkg/specgen"
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/stdcopy"
 	"golang.zx2c4.com/wireguard/conn"
@@ -27,6 +27,11 @@ import (
 
 	"github.com/chipmk/docker-mac-net-connect/networkmanager"
 	"github.com/chipmk/docker-mac-net-connect/version"
+
+	"github.com/containers/podman/v4/pkg/bindings"
+	"github.com/containers/podman/v4/pkg/bindings/containers"
+	"github.com/containers/podman/v4/pkg/bindings/images"
+	"github.com/containers/podman/v4/pkg/bindings/network"
 )
 
 const (
@@ -57,6 +62,7 @@ func main() {
 
 	tun, err := tun.CreateTUN("utun", device.DefaultMTU)
 	if err != nil {
+		fmt.Printf("failed to create TUN device: %v", err)
 		fmt.Errorf("Failed to create TUN device: %v", err)
 		os.Exit(ExitSetupFailed)
 	}
@@ -171,11 +177,18 @@ func main() {
 
 	logger.Verbosef("Interface %s created\n", interfaceName)
 
-	cli, err := client.NewClientWithOpts(client.FromEnv)
+	conn, err := bindings.NewConnection(context.Background(), "unix:///Users/pbrookes/.local/share/containers/podman/machine/qemu/podman.sock")
 	if err != nil {
-		logger.Errorf("Failed to create Docker client: %v", err)
-		os.Exit(ExitSetupFailed)
+		fmt.Println(err)
+		os.Exit(1)
 	}
+
+	//
+	//cli, err := client.NewClientWithOpts(client.FromEnv)
+	//if err != nil {
+	//	logger.Errorf("Failed to create Docker client: %v", err)
+	//	os.Exit(ExitSetupFailed)
+	//}
 
 	logger.Verbosef("Wireguard server listening\n")
 
@@ -183,68 +196,71 @@ func main() {
 
 	go func() {
 		for {
-			logger.Verbosef("Setting up Wireguard on Docker Desktop VM\n")
-
-			err = setupVm(ctx, cli, port, hostPeerIp, vmPeerIp, hostPrivateKey, vmPrivateKey)
+			fmt.Printf("STARTING FOR\n")
+			err = setupPodmanVm(ctx, conn, port, hostPeerIp, vmPeerIp, hostPrivateKey, vmPrivateKey)
 			if err != nil {
 				logger.Errorf("Failed to setup VM: %v", err)
 				time.Sleep(5 * time.Second)
 				continue
 			}
+			fmt.Printf("Set up VM\n")
 
-			networks, err := cli.NetworkList(ctx, types.NetworkListOptions{})
+			networks, err := network.List(conn, &network.ListOptions{})
+			//networks, err := cli.NetworkList(ctx, types.NetworkListOptions{})
 			if err != nil {
-				logger.Errorf("Failed to list Docker networks: %v", err)
+				logger.Errorf("Failed to list podman networks: %v", err)
 				time.Sleep(5 * time.Second)
 				continue
 			}
 
 			for _, network := range networks {
-				networkManager.ProcessDockerNetworkCreate(network, interfaceName)
+				fmt.Printf("network create for %+v", network)
+				networkManager.ProcessPodmanNetworkCreate(network, interfaceName)
 			}
 
 			logger.Verbosef("Watching Docker events\n")
 
-			msgs, errsChan := cli.Events(ctx, types.EventsOptions{
-				Filters: filters.NewArgs(
-					filters.Arg("type", "network"),
-					filters.Arg("event", "create"),
-					filters.Arg("event", "destroy"),
-				),
-			})
-
-			for loop := true; loop; {
-				select {
-				case err := <-errsChan:
-					logger.Errorf("Error: %v\n", err)
-					loop = false
-				case msg := <-msgs:
-					// Add routes when new Docker networks are created
-					if msg.Type == "network" && msg.Action == "create" {
-						network, err := cli.NetworkInspect(ctx, msg.Actor.ID, types.NetworkInspectOptions{})
-						if err != nil {
-							logger.Errorf("Failed to inspect new Docker network: %v", err)
-							continue
-						}
-
-						networkManager.ProcessDockerNetworkCreate(network, interfaceName)
-						continue
-					}
-
-					// Delete routes when Docker networks are destroyed
-					if msg.Type == "network" && msg.Action == "destroy" {
-						network, exists := networkManager.DockerNetworks[msg.Actor.ID]
-						if !exists {
-							logger.Errorf("Unknown Docker network with ID %s. No routes will be removed.")
-							continue
-						}
-
-						networkManager.ProcessDockerNetworkDestroy(network)
-						continue
-					}
-				}
-			}
-
+			//	client.e
+			//	msgs, errsChan := client.Events(ctx, types.EventsOptions{
+			//		Filters: filters.NewArgs(
+			//			filters.Arg("type", "network"),
+			//			filters.Arg("event", "create"),
+			//			filters.Arg("event", "destroy"),
+			//		),
+			//	})
+			//
+			//for loop := true; loop; {
+			//		select {
+			//		case err := <-errsChan:
+			//			logger.Errorf("Error: %v\n", err)
+			//			loop = false
+			//		case msg := <-msgs:
+			//			// Add routes when new Docker networks are created
+			//			if msg.Type == "network" && msg.Action == "create" {
+			//				network, err := cli.NetworkInspect(ctx, msg.Actor.ID, types.NetworkInspectOptions{})
+			//				if err != nil {
+			//					logger.Errorf("Failed to inspect new Docker network: %v", err)
+			//					continue
+			//				}
+			//
+			//				networkManager.ProcessDockerNetworkCreate(network, interfaceName)
+			//				continue
+			//			}
+			//
+			//			// Delete routes when Docker networks are destroyed
+			//			if msg.Type == "network" && msg.Action == "destroy" {
+			//				network, exists := networkManager.DockerNetworks[msg.Actor.ID]
+			//				if !exists {
+			//					logger.Errorf("Unknown Docker network with ID %s. No routes will be removed.")
+			//					continue
+			//				}
+			//
+			//				networkManager.ProcessDockerNetworkDestroy(network)
+			//				continue
+			//			}
+			//		}
+			//}
+			//
 			time.Sleep(5 * time.Second)
 		}
 	}()
@@ -268,7 +284,70 @@ func main() {
 	logger.Verbosef("Shutting down\n")
 }
 
-func setupVm(
+func setupPodmanVm(
+	ctx context.Context,
+	podmanCli context.Context,
+	serverPort int,
+	hostPeerIp string,
+	vmPeerIp string,
+	hostPrivateKey wgtypes.Key,
+	vmPrivateKey wgtypes.Key,
+) error {
+
+	imageName := fmt.Sprintf("%s:%s", version.SetupImage, version.Version)
+
+	_, err := images.GetImage(podmanCli, imageName, &images.GetOptions{})
+	if err != nil {
+		fmt.Printf("Image (%v) doesn't exist locally. Pulling...\n", imageName)
+
+		_, err := images.Pull(podmanCli, imageName, &images.PullOptions{})
+		if err != nil {
+			return fmt.Errorf("failed to pull setup image: %w", err)
+		}
+	}
+
+	resp, err := containers.CreateWithSpec(podmanCli, &specgen.SpecGenerator{
+		ContainerBasicConfig: specgen.ContainerBasicConfig{
+			Name:         "wireguard-setup",
+			RawImageName: imageName,
+			Remove:       true,
+			Env: map[string]string{
+				"SERVER_PORT":     strconv.Itoa(serverPort),
+				"HOST_PEER_IP":    hostPeerIp,
+				"VM_PEER_IP":      vmPeerIp,
+				"HOST_PUBLIC_KEY": hostPrivateKey.PublicKey().String(),
+				"VM_PRIVATE_KEY":  vmPrivateKey.String(),
+			},
+			Command: []string{"./app"},
+		},
+		ContainerSecurityConfig: specgen.ContainerSecurityConfig{
+			CapAdd: []string{"NET_ADMIN"},
+		},
+		ContainerStorageConfig: specgen.ContainerStorageConfig{
+			Image: imageName,
+		},
+		ContainerNetworkConfig: specgen.ContainerNetworkConfig{
+			NetNS: specgen.Namespace{
+				NSMode: specgen.Host,
+			},
+		},
+	}, &containers.CreateOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to create container: %w", err)
+	}
+
+	// Run container to completion
+	err = containers.Start(podmanCli, resp.ID, &containers.StartOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to start container: %w", err)
+	}
+
+	fmt.Println("Setup container complete")
+
+	return nil
+}
+
+func setupDockerVm(
 	ctx context.Context,
 	dockerCli *client.Client,
 	serverPort int,
@@ -281,7 +360,7 @@ func setupVm(
 
 	_, _, err := dockerCli.ImageInspectWithRaw(ctx, imageName)
 	if err != nil {
-		fmt.Printf("Image doesn't exist locally. Pulling...\n")
+		fmt.Printf("Image (%v) doesn't exist locally. Pulling...\n", imageName)
 
 		pullStream, err := dockerCli.ImagePull(ctx, imageName, types.ImagePullOptions{})
 		if err != nil {
